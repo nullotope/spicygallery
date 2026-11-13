@@ -19,8 +19,8 @@ import org.springframework.stereotype.Service;
 
 /**
  * Run lifecycle (spec §6.1/§8): one active run, 409 on second start, 400 when every
- * configured root is inaccessible, run row as REST-reconcile source, SSE fan-out.
- * The reporter funnels the pipeline's throttled events into the hub immediately and
+ * configured root is inaccessible, run row as REST-reconcile source. The reporter
+ * funnels the pipeline's throttled events into the run events seam immediately and
  * into the run row at most once per second.
  */
 @Service
@@ -33,18 +33,21 @@ public class ImportService {
 
     private final SpicyGalleryProperties props;
     private final ImportRunStore runs;
-    private final ImportSseHub hub;
+    private final ImportRunEvents events;
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final AtomicBoolean running = new AtomicBoolean(false);
+
+    /** Live stats of the active run (transient — merged into /api/imports/last). */
+    private volatile ImportStats latestStats;
 
     private volatile PipelineFactory factory;
     private volatile ImportPoolFollowUp followUp;
 
     public ImportService(SpicyGalleryProperties props, ImportRunStore runs,
-                         ImportSseHub hub, PipelineFactory factory, ImportPoolFollowUp followUp) {
+                         ImportRunEvents events, PipelineFactory factory, ImportPoolFollowUp followUp) {
         this.props = props;
         this.runs = runs;
-        this.hub = hub;
+        this.events = events;
         this.factory = factory;
         this.followUp = followUp;
     }
@@ -66,6 +69,15 @@ public class ImportService {
 
     public boolean running() {
         return running.get();
+    }
+
+    /**
+     * The active run's live stats (the pipeline throttles to ~4/s) — the polling
+     * transport merges these into {@code GET /api/imports/last} while a run is active.
+     * Empty when idle.
+     */
+    public java.util.Optional<ImportStats> activeStats() {
+        return running.get() ? java.util.Optional.ofNullable(latestStats) : java.util.Optional.empty();
     }
 
     public synchronized long start() throws ImportInProgressException, AllRootsInaccessibleException {
@@ -121,7 +133,7 @@ public class ImportService {
     }
 
     /**
-     * One run's funnel: hub broadcast immediately (the pipeline already throttles to
+     * One run's funnel: events fan-out immediately (the pipeline already throttles to
      * ~4/s), run-row touch at most once per second, terminal events exactly once.
      */
     private final class ImportRunReporter implements ImportReporter {
@@ -138,7 +150,8 @@ public class ImportService {
 
         @Override
         public void progress(ImportStats stats) {
-            hub.progress(stats);
+            latestStats = stats;
+            events.progress(stats);
             long now = System.currentTimeMillis();
             if (now - lastTouchAt >= TOUCH_THROTTLE_MS) {
                 lastTouchAt = now;
@@ -148,9 +161,10 @@ public class ImportService {
 
         @Override
         public void done(ImportResult result) {
+            latestStats = null;
             runs.complete(runId, result);
             draftPool(result);
-            hub.done(result);
+            events.done(result);
             running.set(false);
         }
 
@@ -181,8 +195,9 @@ public class ImportService {
 
         void fatal(String message) {
             if (fatalReported.compareAndSet(false, true)) {
+                latestStats = null;
                 runs.fail(runId, message);
-                hub.failed(message);
+                events.failed(message);
                 running.set(false);
             }
         }

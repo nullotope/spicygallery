@@ -2,15 +2,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { flushPromises, mount } from '@vue/test-utils';
 import { createPinia } from 'pinia';
 import { Quasar } from 'quasar';
-import { FakeEventSource } from 'src/test-support/fake-event-source';
 import type { RunDto } from 'src/stores/importStore';
 
+const apiGet = vi.fn();
 const apiPost = vi.fn();
 let lastRun: { data: { run: RunDto | null } } = { data: { run: null } };
 vi.mock('src/boot/api', () => ({
   api: {
-    get: (url: string) =>
-      url === '/api/imports/last' ? Promise.resolve(lastRun) : Promise.resolve({ data: null }),
+    get: (url: string) => {
+      apiGet(url);
+      return url === '/api/imports/last'
+        ? Promise.resolve(lastRun)
+        : Promise.resolve({ data: null });
+    },
     post: (...args: unknown[]) => apiPost(...args),
   },
 }));
@@ -21,7 +25,6 @@ vi.mock('vue-router', () => ({
 }));
 
 const { default: ImportControls } = await import('src/components/ImportControls.vue');
-const { useImportStore } = await import('src/stores/importStore');
 
 function mountControls(pinia = createPinia()) {
   return mount(ImportControls, {
@@ -29,57 +32,61 @@ function mountControls(pinia = createPinia()) {
   });
 }
 
-function emitProgress(stats: {
-  scanned: number;
-  added: number;
-  updated: number;
-  missing: number;
-  errors: number;
-  processed?: number;
-  current?: string | null;
-}) {
-  // spread last: absent `processed` stays absent (legacy-shape events → indeterminate bar)
-  FakeEventSource.last?.emit('progress', { current: null, ...stats });
-}
-
 function dialogEl(): HTMLElement | null {
   return document.querySelector('[data-testid="import-dialog"]');
 }
 
-function runningRun(): RunDto {
+/** what /api/imports/last answers for a run in a given state */
+function runPayload(overrides: Partial<RunDto>): { data: { run: RunDto | null } } {
   return {
-    id: 1,
-    status: 'running',
-    startedAt: '2026-11-08T00:00:00Z',
-    finishedAt: null,
-    scanned: 0,
-    added: 0,
-    updated: 0,
-    missingCount: 0,
-    errorCount: 0,
-    message: null,
+    data: {
+      run: {
+        id: 1,
+        status: 'running',
+        startedAt: '2026-11-08T00:00:00Z',
+        finishedAt: null,
+        scanned: 0,
+        added: 0,
+        updated: 0,
+        missingCount: 0,
+        errorCount: 0,
+        message: null,
+        ...overrides,
+      },
+    },
   };
+}
+
+/** one poll pass once the poller's idle cadence is scheduled (see run-poller) */
+async function pollTick() {
+  await vi.advanceTimersByTimeAsync(15_000);
+  await flushPromises();
+}
+
+/** one poll pass while the fast (run-active) cadence is scheduled */
+async function fastPollTick() {
+  await vi.advanceTimersByTimeAsync(1_000);
+  await flushPromises();
 }
 
 describe('ImportControls — header import button + seamless progress dialog', () => {
   beforeEach(() => {
-    FakeEventSource.last = null;
-    FakeEventSource.all = [];
-    FakeEventSource.createdCount = 0;
     lastRun = { data: { run: null } };
-    vi.stubGlobal('EventSource', FakeEventSource);
+    apiGet.mockClear();
+    apiPost.mockClear();
+    vi.useFakeTimers();
   });
 
   afterEach(() => {
-    vi.unstubAllGlobals();
+    vi.useRealTimers();
     document.querySelectorAll('.q-dialog').forEach((el) => el.remove()); // q-dialog teleports to body
   });
 
   it('seamless bottom dialog shows live counters while a run is active', async () => {
     mountControls();
     await flushPromises();
-    emitProgress({ scanned: 5, added: 2, updated: 1, missing: 0, errors: 0 });
-    await flushPromises();
+    lastRun = runPayload({ scanned: 5, added: 2, updated: 1, missingCount: 0, errorCount: 0 });
+    await pollTick();
     const dialog = dialogEl();
     expect(dialog).not.toBeNull();
     expect(dialog?.textContent).toContain('5 scanned');
@@ -90,11 +97,11 @@ describe('ImportControls — header import button + seamless progress dialog', (
   it('progress dialog shows processed/total with a determinate bar and the current file', async () => {
     mountControls();
     await flushPromises();
-    emitProgress({
-      scanned: 10, processed: 3, added: 2, updated: 1, missing: 0, errors: 0,
+    lastRun = runPayload({
+      scanned: 10, processed: 3, added: 2, updated: 1, missingCount: 0, errorCount: 0,
       current: 'downloads/sub/page.jpg',
     });
-    await flushPromises();
+    await pollTick();
     const line = document.querySelector('[data-testid="import-progress-line"]');
     expect(line?.textContent).toContain('processing 3 / 10');
     expect(line?.textContent).toContain('30%');
@@ -106,11 +113,11 @@ describe('ImportControls — header import button + seamless progress dialog', (
     expect(bar?.getAttribute('aria-valuenow')).toBe('0.3');
   });
 
-  it('legacy progress events without processed keep the indeterminate bar and no progress line', async () => {
+  it('a running run without processed keeps the indeterminate bar and no progress line', async () => {
     mountControls();
     await flushPromises();
-    emitProgress({ scanned: 5, added: 2, updated: 1, missing: 0, errors: 0 });
-    await flushPromises();
+    lastRun = runPayload({ scanned: 5, added: 2, updated: 1, missingCount: 0, errorCount: 0 });
+    await pollTick();
     expect(document.querySelector('[data-testid="import-progress-line"]')).toBeNull();
     const bar = document.querySelector('[data-testid="import-progress"]');
     expect(bar?.querySelector('.q-linear-progress__model--indeterminate')).not.toBeNull();
@@ -119,8 +126,8 @@ describe('ImportControls — header import button + seamless progress dialog', (
   it('dismissed dialog reopens from the button while the run is active — no second import', async () => {
     const wrapper = mountControls();
     await flushPromises();
-    emitProgress({ scanned: 5, added: 2, updated: 1, missing: 0, errors: 0 });
-    await flushPromises();
+    lastRun = runPayload({ scanned: 5, added: 2, updated: 1, missingCount: 0, errorCount: 0 });
+    await pollTick();
     expect(dialogEl()).not.toBeNull();
 
     (document.querySelector('[data-testid="import-dialog-close"]') as HTMLElement).click();
@@ -137,29 +144,21 @@ describe('ImportControls — header import button + seamless progress dialog', (
   it('shows the final report when the run completes, until dismissed', async () => {
     mountControls();
     await flushPromises();
-    const source = FakeEventSource.last;
-    expect(source).not.toBeNull();
-    emitProgress({ scanned: 5, added: 2, updated: 1, missing: 0, errors: 0 });
-    await flushPromises();
+    lastRun = runPayload({ scanned: 5, added: 2, updated: 1, missingCount: 0, errorCount: 0 });
+    await pollTick();
+    expect(dialogEl()).not.toBeNull();
 
-    lastRun = {
-      data: {
-        run: {
-          id: 1,
-          status: 'completed',
-          startedAt: '2026-11-08T00:00:00Z',
-          finishedAt: '2026-11-08T00:01:00Z',
-          scanned: 10,
-          added: 3,
-          updated: 2,
-          missingCount: 1,
-          errorCount: 0,
-          message: null,
-        },
-      },
-    };
-    source!.emit('done', {});
-    await flushPromises();
+    lastRun = runPayload({
+      status: 'completed',
+      startedAt: '2026-11-08T00:00:00Z',
+      finishedAt: '2026-11-08T00:01:00Z',
+      scanned: 10,
+      added: 3,
+      updated: 2,
+      missingCount: 1,
+      errorCount: 0,
+    });
+    await fastPollTick();
 
     const dialog = dialogEl();
     expect(dialog).not.toBeNull();
@@ -169,36 +168,32 @@ describe('ImportControls — header import button + seamless progress dialog', (
   });
 
   it('flags the button when the last run failed, without opening the dialog', async () => {
-    lastRun = {
-      data: {
-        run: {
-          id: 1,
-          status: 'failed',
-          startedAt: '2026-11-08T00:00:00Z',
-          finishedAt: '2026-11-08T00:01:00Z',
-          scanned: 4,
-          added: 0,
-          updated: 0,
-          missingCount: 0,
-          errorCount: 2,
-          message: 'boom',
-        },
-      },
-    };
+    lastRun = runPayload({
+      status: 'failed',
+      startedAt: '2026-11-08T00:00:00Z',
+      finishedAt: '2026-11-08T00:01:00Z',
+      scanned: 4,
+      added: 0,
+      updated: 0,
+      missingCount: 0,
+      errorCount: 2,
+      message: 'boom',
+    });
     const wrapper = mountControls();
     await flushPromises();
     expect(wrapper.find('[data-testid="import-failed-badge"]').exists()).toBe(true);
     expect(dialogEl()).toBeNull();
   });
 
-  it('keeps one EventSource per app session (store guard, review I6)', async () => {
+  it('keeps one poller per app session across mounts (store guard, review I6)', async () => {
     const pinia = createPinia();
     mountControls(pinia);
     await flushPromises();
     mountControls(pinia);
     await flushPromises();
-    expect(FakeEventSource.createdCount).toBe(1);
-    expect(FakeEventSource.last?.url).toBe('/api/imports/events');
+    // one immediate reconcile from the first mount's poller start — the second
+    // mount's startPolling is idempotent and does not re-poll
+    expect(apiGet).toHaveBeenCalledTimes(1);
   });
 
   it('button opens the import modal instead of posting directly', async () => {
@@ -243,28 +238,20 @@ describe('ImportControls — header import button + seamless progress dialog', (
     await flushPromises();
     apiPost.mockClear();
 
-    const source = FakeEventSource.last;
-    expect(source).not.toBeNull();
-    emitProgress({ scanned: 5, added: 5, updated: 0, missing: 0, errors: 0 });
-    await flushPromises();
-    lastRun = {
-      data: {
-        run: {
-          id: 2,
-          status: 'completed',
-          startedAt: '2026-11-09T00:00:00Z',
-          finishedAt: '2026-11-09T00:01:00Z',
-          scanned: 5,
-          added: 5,
-          updated: 0,
-          missingCount: 0,
-          errorCount: 0,
-          message: null,
-        },
-      },
-    };
-    source!.emit('done', {});
-    await flushPromises();
+    lastRun = runPayload({ scanned: 5, added: 5, updated: 0, missingCount: 0, errorCount: 0 });
+    await pollTick();
+    lastRun = runPayload({
+      id: 2,
+      status: 'completed',
+      startedAt: '2026-11-09T00:00:00Z',
+      finishedAt: '2026-11-09T00:01:00Z',
+      scanned: 5,
+      added: 5,
+      updated: 0,
+      missingCount: 0,
+      errorCount: 0,
+    });
+    await fastPollTick();
 
     const bulkCalls = apiPost.mock.calls.filter(([url]) => url === '/api/tagging/bulk');
     expect(bulkCalls.length).toBe(1);
@@ -282,27 +269,20 @@ describe('ImportControls — header import button + seamless progress dialog', (
     await flushPromises();
     apiPost.mockClear();
 
-    const source = FakeEventSource.last;
-    emitProgress({ scanned: 5, added: 5, updated: 0, missing: 0, errors: 0 });
-    await flushPromises();
-    lastRun = {
-      data: {
-        run: {
-          id: 2,
-          status: 'completed',
-          startedAt: '2026-11-09T00:00:00Z',
-          finishedAt: '2026-11-09T00:01:00Z',
-          scanned: 5,
-          added: 5,
-          updated: 0,
-          missingCount: 0,
-          errorCount: 0,
-          message: null,
-        },
-      },
-    };
-    source!.emit('done', {});
-    await flushPromises();
+    lastRun = runPayload({ scanned: 5, added: 5, updated: 0, missingCount: 0, errorCount: 0 });
+    await pollTick();
+    lastRun = runPayload({
+      id: 2,
+      status: 'completed',
+      startedAt: '2026-11-09T00:00:00Z',
+      finishedAt: '2026-11-09T00:01:00Z',
+      scanned: 5,
+      added: 5,
+      updated: 0,
+      missingCount: 0,
+      errorCount: 0,
+    });
+    await fastPollTick();
 
     expect(apiPost.mock.calls.filter(([url]) => url === '/api/tagging/bulk').length).toBe(0);
   });
@@ -317,27 +297,21 @@ describe('ImportControls — header import button + seamless progress dialog', (
     await flushPromises();
     apiPost.mockClear();
 
-    const source = FakeEventSource.last;
-    emitProgress({ scanned: 5, added: 0, updated: 0, missing: 0, errors: 5 });
-    await flushPromises();
-    lastRun = {
-      data: {
-        run: {
-          id: 2,
-          status: 'failed',
-          startedAt: '2026-11-09T00:00:00Z',
-          finishedAt: '2026-11-09T00:01:00Z',
-          scanned: 5,
-          added: 0,
-          updated: 0,
-          missingCount: 0,
-          errorCount: 5,
-          message: 'boom',
-        },
-      },
-    };
-    source!.emit('done', {});
-    await flushPromises();
+    lastRun = runPayload({ scanned: 5, added: 0, updated: 0, missingCount: 0, errorCount: 5 });
+    await pollTick();
+    lastRun = runPayload({
+      id: 2,
+      status: 'failed',
+      startedAt: '2026-11-09T00:00:00Z',
+      finishedAt: '2026-11-09T00:01:00Z',
+      scanned: 5,
+      added: 0,
+      updated: 0,
+      missingCount: 0,
+      errorCount: 5,
+      message: 'boom',
+    });
+    await fastPollTick();
 
     expect(apiPost.mock.calls.filter(([url]) => url === '/api/tagging/bulk').length).toBe(0);
   });
@@ -382,29 +356,21 @@ describe('ImportControls — header import button + seamless progress dialog', (
     await flushPromises();
     apiPost.mockClear();
 
-    const source = FakeEventSource.last;
-    expect(source).not.toBeNull();
-    emitProgress({ scanned: 5, added: 5, updated: 0, missing: 0, errors: 0 });
-    await flushPromises();
-    lastRun = {
-      data: {
-        run: {
-          id: 2,
-          status: 'completed',
-          startedAt: '2026-11-09T00:00:00Z',
-          finishedAt: '2026-11-09T00:01:00Z',
-          scanned: 5,
-          added: 5,
-          updated: 0,
-          missingCount: 0,
-          errorCount: 0,
-          message: null,
-          poolId: 7,
-        },
-      },
-    };
-    source!.emit('done', {});
-    await flushPromises();
+    lastRun = runPayload({ scanned: 5, added: 5, updated: 0, missingCount: 0, errorCount: 0 });
+    await pollTick();
+    lastRun = runPayload({
+      id: 2,
+      status: 'completed',
+      startedAt: '2026-11-09T00:00:00Z',
+      finishedAt: '2026-11-09T00:01:00Z',
+      scanned: 5,
+      added: 5,
+      updated: 0,
+      missingCount: 0,
+      errorCount: 0,
+      poolId: 7,
+    });
+    await fastPollTick();
 
     const link = document.querySelector('[data-testid="import-pool-link"]');
     expect(link).not.toBeNull();
@@ -423,28 +389,21 @@ describe('ImportControls — header import button + seamless progress dialog', (
     (document.querySelector('[data-testid="import-start"]') as HTMLElement).click();
     await flushPromises();
 
-    const source = FakeEventSource.last;
-    emitProgress({ scanned: 5, added: 5, updated: 0, missing: 0, errors: 0 });
-    await flushPromises();
-    lastRun = {
-      data: {
-        run: {
-          id: 2,
-          status: 'completed',
-          startedAt: '2026-11-09T00:00:00Z',
-          finishedAt: '2026-11-09T00:01:00Z',
-          scanned: 5,
-          added: 5,
-          updated: 0,
-          missingCount: 0,
-          errorCount: 0,
-          message: null,
-          poolId: null,
-        },
-      },
-    };
-    source!.emit('done', {});
-    await flushPromises();
+    lastRun = runPayload({ scanned: 5, added: 5, updated: 0, missingCount: 0, errorCount: 0 });
+    await pollTick();
+    lastRun = runPayload({
+      id: 2,
+      status: 'completed',
+      startedAt: '2026-11-09T00:00:00Z',
+      finishedAt: '2026-11-09T00:01:00Z',
+      scanned: 5,
+      added: 5,
+      updated: 0,
+      missingCount: 0,
+      errorCount: 0,
+      poolId: null,
+    });
+    await fastPollTick();
 
     const note = document.querySelector('[data-testid="import-pool-none"]');
     expect(note).not.toBeNull();
@@ -460,28 +419,21 @@ describe('ImportControls — header import button + seamless progress dialog', (
     (document.querySelector('[data-testid="import-start"]') as HTMLElement).click();
     await flushPromises();
 
-    const source = FakeEventSource.last;
-    emitProgress({ scanned: 5, added: 5, updated: 0, missing: 0, errors: 0 });
-    await flushPromises();
-    lastRun = {
-      data: {
-        run: {
-          id: 2,
-          status: 'completed',
-          startedAt: '2026-11-09T00:00:00Z',
-          finishedAt: '2026-11-09T00:01:00Z',
-          scanned: 5,
-          added: 5,
-          updated: 0,
-          missingCount: 0,
-          errorCount: 0,
-          message: null,
-          poolId: null,
-        },
-      },
-    };
-    source!.emit('done', {});
-    await flushPromises();
+    lastRun = runPayload({ scanned: 5, added: 5, updated: 0, missingCount: 0, errorCount: 0 });
+    await pollTick();
+    lastRun = runPayload({
+      id: 2,
+      status: 'completed',
+      startedAt: '2026-11-09T00:00:00Z',
+      finishedAt: '2026-11-09T00:01:00Z',
+      scanned: 5,
+      added: 5,
+      updated: 0,
+      missingCount: 0,
+      errorCount: 0,
+      poolId: null,
+    });
+    await fastPollTick();
 
     expect(document.querySelector('[data-testid="import-pool-link"]')).toBeNull();
     expect(document.querySelector('[data-testid="import-pool-none"]')).toBeNull();

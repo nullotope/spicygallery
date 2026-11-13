@@ -122,7 +122,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { RouterLink } from 'vue-router';
 import { useImportStore } from 'src/stores/importStore';
 import { useTaggingStore } from 'src/stores/tagging';
@@ -172,9 +172,9 @@ watch(running, (active, was) => {
 });
 
 onMounted(() => {
-  store.connect(); // SSE notifies…
-  void store.reconcile(); // …REST reconciles (spec §8)
+  store.startPolling(); // REST reconciles (spec §8) — fast while a run is active
 });
+onBeforeUnmount(() => store.stopPolling());
 
 function onClick() {
   if (running.value) {

@@ -64,13 +64,13 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { api } from 'src/boot/api';
+import { createRunPoller } from 'src/composables/run-poller';
 import type { BackfillStatus, EmbeddingStatus } from 'src/types/embedding';
 
 const status = ref<EmbeddingStatus | null>(null);
 const running = ref(false);
 const progress = ref<{ done: number; total: number; current: string | null } | null>(null);
 const errorMessage = ref<string | null>(null);
-let source: EventSource | null = null;
 
 const canStart = computed(() => status.value?.enabled === true && !running.value);
 const progressFraction = computed(() => {
@@ -87,49 +87,31 @@ async function reconcileStatus() {
   }
 }
 
-async function reconcileBackfill() {
+/** One poll pass (see run-poller): REST is the source of truth (spec §8). Resolves
+ *  to whether a backfill is active, driving the cadence. */
+async function pollWork(): Promise<boolean> {
+  const wasRunning = running.value;
   try {
     const { data } = await api.get<BackfillStatus>('/api/embeddings/backfill');
     running.value = data.running;
     if (data.running) {
-      progress.value = { done: data.done, total: data.total, current: null };
+      progress.value = { done: data.done, total: data.total, current: data.current ?? null };
+    } else if (wasRunning) {
+      // the run just finished: clear live progress and refresh the counts
+      progress.value = null;
+      errorMessage.value = null;
+      void reconcileStatus();
     }
     if (data.error) {
       errorMessage.value = data.error;
     }
   } catch {
-    // ignore — status is best-effort
+    // ignore — status is best-effort; keep the current cadence
   }
+  return running.value;
 }
 
-function connect() {
-  if (source) {
-    return;
-  }
-  const es = new EventSource('/api/embeddings/backfill/events');
-  source = es;
-  es.addEventListener('progress', (event) => {
-    running.value = true;
-    progress.value = JSON.parse((event as MessageEvent).data) as {
-      done: number;
-      total: number;
-      current: string | null;
-    };
-  });
-  es.addEventListener('done', () => {
-    running.value = false;
-    progress.value = null;
-    errorMessage.value = null;
-    void reconcileStatus();
-    void reconcileBackfill();
-  });
-  es.addEventListener('failed', (event) => {
-    running.value = false;
-    const data = JSON.parse((event as MessageEvent).data) as { message?: string };
-    errorMessage.value = data.message ?? 'backfill failed';
-    void reconcileStatus();
-  });
-}
+const poller = createRunPoller({ work: pollWork, activeMs: 1_000, idleMs: 15_000 });
 
 async function startBackfill(force: boolean) {
   errorMessage.value = null;
@@ -137,6 +119,7 @@ async function startBackfill(force: boolean) {
     await api.post('/api/embeddings/backfill', null, force ? { params: { force: true } } : undefined);
     running.value = true;
     progress.value = null;
+    poller.nudge(); // immediate progress read + fast cadence from here
   } catch (e) {
     const status = (e as { response?: { status?: number; data?: { detail?: string } } }).response;
     if (status?.status === 409) {
@@ -150,11 +133,9 @@ async function startBackfill(force: boolean) {
 
 onMounted(() => {
   void reconcileStatus();
-  void reconcileBackfill();
-  connect();
+  poller.start(); // REST reconciles (spec §8) — fast while a backfill is active
 });
 onBeforeUnmount(() => {
-  source?.close();
-  source = null;
+  poller.stop();
 });
 </script>

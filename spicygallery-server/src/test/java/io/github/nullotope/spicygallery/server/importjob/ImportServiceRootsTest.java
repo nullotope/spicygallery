@@ -46,7 +46,7 @@ class ImportServiceRootsTest {
 
     private static ImportService serviceWith(SpicyGalleryProperties props) {
         FakeRuns runs = new FakeRuns();
-        return new ImportService(props, runs, new ImportSseHub(), reporter -> {
+        return new ImportService(props, runs, ImportRunEvents.NOOP, reporter -> {
             throw new AssertionError("pipeline must not be created");
         }, ids -> {
             throw new AssertionError("follow-up must not run");

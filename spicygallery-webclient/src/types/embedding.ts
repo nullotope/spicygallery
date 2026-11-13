@@ -12,4 +12,6 @@ export interface BackfillStatus {
   done: number;
   total: number;
   error: string | null;
+  /** transient live-progress detail — the entry currently being embedded (null when idle) */
+  current?: string | null;
 }

@@ -79,8 +79,8 @@ const run = computed(() => store.run);
 const running = computed(() => run.value?.running === true);
 const show = ref(false);
 const notice = ref<string | null>(null);
-/** Current entry from the SSE progress events (RunDto omits it); only shown while running. */
-const current = ref<string | null>(null);
+/** Current entry from the live progress (RunDto.current); only shown while running. */
+const current = computed(() => run.value?.current ?? null);
 
 // a run becoming active opens the monitor — including a run discovered by the
 // mount-time reconcile (e.g. after a page reload mid-run)
@@ -88,28 +88,16 @@ watch(running, (active) => {
   if (active) {
     show.value = true;
     notice.value = null;
-  } else {
-    current.value = null;
   }
 });
 
 onMounted(() => {
-  store.connect(); // SSE notifies…
-  void store.reconcile(); // …REST reconciles (spec §8)
-  // tap the shared source for the progress event's `current` field — one
-  // EventSource per app session (store guard), no second connection here
-  store.source?.addEventListener('progress', onProgress);
+  store.startPolling(); // REST reconciles (spec §8) — fast while a run is active
 });
 
 onBeforeUnmount(() => {
-  // FakeEventSource (tests) ships no removeEventListener
-  store.source?.removeEventListener?.('progress', onProgress);
+  store.stopPolling();
 });
-
-function onProgress(event: Event) {
-  const stats = JSON.parse((event as MessageEvent).data) as { current: string | null };
-  current.value = stats.current;
-}
 
 async function start(scope: { q?: string; untagged?: boolean }) {
   if (running.value) {

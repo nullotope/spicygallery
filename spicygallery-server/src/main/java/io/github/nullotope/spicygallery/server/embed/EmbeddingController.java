@@ -9,7 +9,6 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 /**
  * Embedding management API (spec §6): backfill trigger + SSE progress, status for the
@@ -61,10 +60,5 @@ public class EmbeddingController {
     @GetMapping("/api/embeddings/backfill")
     public EmbeddingBackfill.BackfillStatus backfillStatus() {
         return backfill.status();
-    }
-
-    @GetMapping("/api/embeddings/backfill/events")
-    public SseEmitter backfillEvents() {
-        return backfill.hub().register();
     }
 }

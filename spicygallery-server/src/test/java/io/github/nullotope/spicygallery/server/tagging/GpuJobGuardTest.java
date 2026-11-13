@@ -39,22 +39,22 @@ class GpuJobGuardTest {
 
     @Test
     void a_tagging_worker_that_throws_still_releases_the_guard() {
-        // the scope source explodes and the hub explodes while reporting it — the failure
-        // escapes the worker loop entirely; the finally-block release must still happen
+        // the scope source explodes and the events fan-out explodes while reporting it —
+        // the failure escapes the worker loop entirely; the finally-block release must still happen
         TaggingBackfill.PageSource boom = (afterId, limit) -> {
             throw new RuntimeException("scope exploded");
         };
-        TaggingSseHub failingHub = new TaggingSseHub() {
+        TaggingBackfill.Events failingEvents = new TaggingBackfill.Events() {
             @Override
             public void failed(String message) {
-                throw new IllegalStateException("hub exploded");
+                throw new IllegalStateException("events fan-out exploded");
             }
         };
         TaggingService tagging = new TaggingService(null, null, null,
                 new SpicyGalleryProperties.Tagging(true, null, null, null, null, null, null),
                 null, null, Clock.systemUTC());
         TaggingBackfill backfill = new TaggingBackfill(tagging, null, ids -> Map.of(),
-                boom, boom, failingHub, guard);
+                boom, boom, failingEvents, guard);
         backfill.start("query", null, false);
         backfill.joinForTests();
 

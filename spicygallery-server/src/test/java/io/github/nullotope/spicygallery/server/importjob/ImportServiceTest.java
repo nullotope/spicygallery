@@ -63,8 +63,8 @@ class ImportServiceTest extends PostgresBase {
         r.add("spicygallery.workers", () -> "1"); // serial → deterministic slow runs
     }
 
-    /** Recording hub (no Mockito — JDK 25 breaks the BOM's inline mock maker). */
-    static final class RecordingHub extends ImportSseHub {
+    /** Recording listener (no Mockito — JDK 25 breaks the BOM's inline mock maker). */
+    static final class RecordingEvents implements ImportRunEvents {
         final List<ImportResult> doneResults = new CopyOnWriteArrayList<>();
         final List<String> failures = new CopyOnWriteArrayList<>();
         final AtomicInteger progressCount = new AtomicInteger();
@@ -89,14 +89,14 @@ class ImportServiceTest extends PostgresBase {
     static class Cfg {
         @Bean
         @Primary
-        ImportSseHub recordingHub() {
-            return new RecordingHub();
+        ImportRunEvents recordingEvents() {
+            return new RecordingEvents();
         }
     }
 
     @Autowired ImportService service;
     @Autowired JdbcImportRunStore runs;
-    @Autowired RecordingHub hub;
+    @Autowired RecordingEvents events;
     @Autowired io.github.nullotope.spicygallery.server.store.JdbcMediaStoreSink jdbcSink;
 
     /**
@@ -175,9 +175,9 @@ class ImportServiceTest extends PostgresBase {
         ImportRunRow row = runs.last().orElseThrow();
         assertEquals("completed", row.status());
         assertEquals(21, row.added());
-        awaitTrue("done event", () -> !hub.doneResults.isEmpty());
-        assertEquals(21, hub.doneResults.get(0).added());
-        assertTrue(hub.progressCount.get() >= 1);
+        awaitTrue("done event", () -> !events.doneResults.isEmpty());
+        assertEquals(21, events.doneResults.get(0).added());
+        assertTrue(events.progressCount.get() >= 1);
     }
 
     @Test
@@ -207,8 +207,8 @@ class ImportServiceTest extends PostgresBase {
         assertEquals(runId, row.id());
         assertEquals("failed", row.status());
         assertTrue(row.message() != null && row.message().contains("boom"));
-        awaitTrue("failed event", () -> !hub.failures.isEmpty());
-        assertTrue(hub.failures.get(0).contains("boom"));
+        awaitTrue("failed event", () -> !events.failures.isEmpty());
+        assertTrue(events.failures.get(0).contains("boom"));
     }
 
     @Test

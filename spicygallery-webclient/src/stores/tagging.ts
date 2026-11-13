@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia';
 import { api } from 'src/boot/api';
+import { createRunPoller, type RunPoller } from 'src/composables/run-poller';
 import type { PredictResponse, TaggingInfo } from 'src/types/tagging';
 import type { TagDto } from 'src/types/tags';
 
@@ -10,67 +11,46 @@ export interface RunDto {
   total: number;
   errors: number;
   error: string | null;
-}
-
-interface ProgressStats {
-  done: number;
-  total: number;
-  current: string | null;
-  errors: number;
+  /** transient live-progress detail — the entry the run is currently on */
+  current?: string | null;
 }
 
 /**
- * Tagging run state. SSE notifies, REST reconciles (single-mapper rule):
- * onerror, done and failed always refetch /api/tagging/last.
+ * Tagging run state. Polled, not pushed: the SSE transport held one browser socket
+ * open per tab forever and starved the HTTP/1.1 6-connections-per-host pool. REST
+ * stays the source of truth (spec §8) — the poller reconciles /api/tagging/last at
+ * a fast cadence while a run is active and a slow one otherwise (paused entirely
+ * for background tabs; see run-poller).
  */
 export const useTaggingStore = defineStore('tagging', {
   state: () => ({
     info: null as TaggingInfo | null,
     run: null as RunDto | null,
-    connected: false,
-    /** One EventSource per app session — the guard also protects against
-     *  accidental double connects (see importStore, review I6). */
-    source: null as EventSource | null,
+    poller: null as RunPoller | null,
   }),
   actions: {
-    connect() {
-      if (this.source) {
+    /** Idempotent: one poller per app session regardless of mount count. */
+    startPolling() {
+      if (this.poller) {
+        this.poller.start();
         return;
       }
-      const source = new EventSource('/api/tagging/events');
-      this.source = source;
-      source.onopen = () => {
-        this.connected = true;
-      };
-      source.addEventListener('progress', (event) => {
-        const stats = JSON.parse((event as MessageEvent).data) as ProgressStats;
-        this.run = {
-          running: true,
-          done: stats.done,
-          total: stats.total,
-          errors: stats.errors,
-          error: null,
-        };
-      });
-      source.addEventListener('done', () => {
-        void this.reconcile();
-      });
-      source.addEventListener('failed', () => {
-        void this.reconcile();
-      });
-      source.onerror = () => {
-        this.connected = false;
-        void this.reconcile();
-      };
+      this.poller = createRunPoller({ work: () => this.reconcile() });
+      this.poller.start();
     },
-    /** REST reconcile — the source of truth (spec §8). */
-    async reconcile() {
+    stopPolling() {
+      this.poller?.stop();
+    },
+    /** REST reconcile — the source of truth (spec §8). Resolves to whether a run
+     *  is active (drives the poller's cadence). */
+    async reconcile(): Promise<boolean> {
       const { data } = await api.get<RunDto>('/api/tagging/last');
       this.run = data;
+      return data.running;
     },
     async startBulk(scope: { q?: string; untagged?: boolean }) {
       await api.post('/api/tagging/bulk', scope);
-      await this.reconcile();
+      this.poller?.nudge(); // immediate progress read + fast cadence from here
     },
     async refreshInfo() {
       const { data } = await api.get<TaggingInfo>('/api/tagging/info');

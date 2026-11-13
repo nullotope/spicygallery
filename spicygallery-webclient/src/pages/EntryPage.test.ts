@@ -3,7 +3,6 @@ import { reactive } from 'vue';
 import { mount, flushPromises, DOMWrapper } from '@vue/test-utils';
 import { createPinia } from 'pinia';
 import { Quasar } from 'quasar';
-import { FakeEventSource } from 'src/test-support/fake-event-source';
 
 const apiGet = vi.fn();
 const apiPost = vi.fn();
@@ -103,9 +102,6 @@ describe('EntryPage', () => {
     poolList = [];
     routeState.params = { id: '42' };
     push.mockReset();
-    FakeEventSource.last = null;
-    FakeEventSource.all = [];
-    vi.stubGlobal('EventSource', FakeEventSource);
     // neighbors fallback (no in-memory list in the test)
     apiGet.mockImplementation((url: string) => {
       if (url === '/api/entries/42') {

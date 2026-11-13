@@ -20,16 +20,16 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 /**
  * Tagging API (spec §3.2/§6): model observability ({@code /info}), per-entry predict
  * (writes nothing) and apply (the user-checked subset, model provenance), and the bulk
- * run — start / last / events — under the shared {@link GpuJobGuard}. Bulk runs are
+ * run — start / last — under the shared {@link GpuJobGuard}. Bulk runs are
  * singletons-in-effect (the guard refuses overlap) but per-request objects: each run's
- * scope is fixed at start, and {@code /last} reconciles the most recently started run.
- * Lives in the tagging package: it assembles the per-run {@link TaggingBackfill} from
- * the wiring's beans (the package-private hub ctor shares the wired SSE transport).
+ * scope is fixed at start, and {@code /last} reconciles the most recently started run
+ * (the client polls it — the SSE transport was removed, it starved the browser's
+ * HTTP/1.1 6-connections-per-host pool). Lives in the tagging package: it assembles
+ * the per-run {@link TaggingBackfill} from the wiring's beans.
  */
 @RestController
 public class TaggingController {
@@ -67,7 +67,6 @@ public class TaggingController {
     private final JdbcTagStore store;
     private final TaggingBackfill.EntryLookup lookup;
     private final TaggingBackfill.PageSource untaggedPages;
-    private final TaggingSseHub hub;
     private final GpuJobGuard guard;
     private final EntryQueries queries;
     private final TagService tags;
@@ -77,7 +76,7 @@ public class TaggingController {
 
     public TaggingController(TaggingService tagging, TaggingClient client, JdbcTagStore store,
                              TaggingBackfill.EntryLookup lookup,
-                             TaggingBackfill.PageSource untaggedPages, TaggingSseHub hub,
+                             TaggingBackfill.PageSource untaggedPages,
                              GpuJobGuard guard, EntryQueries queries, TagService tags,
                              SpicyGalleryProperties props) {
         this.tagging = tagging;
@@ -85,7 +84,6 @@ public class TaggingController {
         this.store = store;
         this.lookup = lookup;
         this.untaggedPages = untaggedPages;
-        this.hub = hub;
         this.guard = guard;
         this.queries = queries;
         this.tags = tags;
@@ -167,7 +165,7 @@ public class TaggingController {
             throw new IllegalArgumentException("bulk scope unsupported: " + e.getMessage());
         }
         TaggingBackfill run = new TaggingBackfill(tagging, store, lookup, queryPages,
-                untaggedPages, hub, guard);
+                untaggedPages, TaggingBackfill.Events.NOOP, guard);
         try {
             run.start(untagged ? "untagged" : "query", q, untagged);
         } catch (SchedulingConflictException | IllegalStateException e) {
@@ -182,12 +180,7 @@ public class TaggingController {
     @GetMapping("/api/tagging/last")
     public TaggingBackfill.RunStatus last() {
         TaggingBackfill run = lastRun;
-        return run != null ? run.status() : new TaggingBackfill.RunStatus(false, 0, 0, 0, null);
-    }
-
-    @GetMapping("/api/tagging/events")
-    public SseEmitter events() {
-        return hub.register();
+        return run != null ? run.status() : new TaggingBackfill.RunStatus(false, 0, 0, 0, null, null);
     }
 
     /** 404 for unknown ids (and missing media); resolves the absolute path for the rest. */

@@ -24,7 +24,7 @@ import org.springframework.context.annotation.Configuration;
 /**
  * Production wiring for the tagging stack (spec §3.2): the real Hydra client, the
  * frames seam over the persisted {@code {appData}/frames/{id}} directories, the
- * service, the entry lookup, the untagged bulk scope, the SSE hub, and the shared
+ * service, the entry lookup, the untagged bulk scope, and the shared
  * {@link GpuJobGuard} that serializes the GPU jobs across the embed and tagging
  * features (the single bean both runners hold).
  */
@@ -49,11 +49,6 @@ public class TaggingWiring {
     @Bean
     public TaggingClient taggingClient(SpicyGalleryProperties props) {
         return new TaggingClient(props.tagging().baseUrl(), CLIENT_TIMEOUT);
-    }
-
-    @Bean
-    public TaggingSseHub taggingHub() {
-        return new TaggingSseHub();
     }
 
     /**

@@ -208,8 +208,10 @@ class TaggingApiTest extends PostgresBase {
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.accepted").value(true));
 
-        // SSE endpoint subscribes (async request started; the stream stays open)
-        mvc.perform(get("/api/tagging/events")).andExpect(request().asyncStarted());
+        // the SSE transport is removed (it held a browser socket open per tab forever
+        // and starved the HTTP/1.1 6-connections-per-host pool); the reconcile shape
+        // carries the transient current-file detail instead
+        mvc.perform(get("/api/tagging/events")).andExpect(status().isNotFound());
 
         // wait for the run to finish, then reconcile via REST (the unreadable.png row
         // counts as an error; per-entry failures never abort the run)
@@ -226,6 +228,9 @@ class TaggingApiTest extends PostgresBase {
         assertEquals(7, status.get("total").asLong(), lastRun());
         assertEquals(1, status.get("errors").asLong(), lastRun());
         assertTrue(status.get("error").isNull(), lastRun());
+        // the transient current-file detail is part of the reconcile shape (may be null
+        // only on a run that never processed an entry)
+        assertTrue(status.has("current"), lastRun());
 
         // every untagged entry now carries both predictions with model provenance
         List<Long> all = new ArrayList<>(seedIds);

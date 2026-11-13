@@ -2,13 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { flushPromises, mount } from '@vue/test-utils';
 import { createPinia } from 'pinia';
 import { Quasar } from 'quasar';
-import { FakeEventSource } from 'src/test-support/fake-event-source';
 
+const apiGet = vi.fn().mockResolvedValue({ data: { run: null } });
+const apiPost = vi.fn();
 vi.mock('src/boot/api', () => ({
-  api: {
-    get: vi.fn().mockResolvedValue({ data: { run: null } }),
-    post: vi.fn(),
-  },
+  api: { get: (...args: unknown[]) => apiGet(...args), post: (...args: unknown[]) => apiPost(...args) },
 }));
 
 const RouterLink = { props: ['to'], template: '<a :href="to"><slot /></a>' };
@@ -27,10 +25,8 @@ function mountApp() {
 
 describe('App header', () => {
   beforeEach(() => {
-    FakeEventSource.last = null;
-    FakeEventSource.all = [];
-    FakeEventSource.createdCount = 0;
-    vi.stubGlobal('EventSource', FakeEventSource); // App mounts ImportControls → SSE connect
+    apiGet.mockClear();
+    apiGet.mockResolvedValue({ data: { run: null } });
   });
 
   afterEach(() => {

@@ -30,9 +30,12 @@ import org.slf4j.LoggerFactory;
  * design (wholesale re-apply, idempotent via {@code setEntryTagsPreservingUser}), so seeding
  * there would double-count and it starts at zero.
  *
- * <p>SSE progress mirrors {@code BackfillSseHub} with an errors field; REST status
- * reconciles via {@link #status()}. Not a {@code @Service}: the scope-dependent page
- * sources are supplied by the tagging wiring.
+ * <p>Live progress is carried by the run status itself ({@code RunStatus.current}) and
+ * read by polling {@code GET /api/tagging/last} (spec §3.2); the optional {@link Events}
+ * seam fans transitions out for tests and future subscribers — the SSE transport it
+ * once fed was removed (it held a browser socket open per tab forever and starved the
+ * HTTP/1.1 6-connections-per-host pool). Not a {@code @Service}: the scope-dependent
+ * page sources are supplied by the tagging wiring.
  *
  * <p>GPU-job exclusivity: {@link #start} takes the shared {@link GpuJobGuard} (the
  * wiring's single bean, shared with the embedding backfill) and the worker releases it
@@ -45,7 +48,28 @@ public class TaggingBackfill {
 
     public record EntryRef(long id, Kind kind, Path absPath) {}
 
-    public record RunStatus(boolean running, long done, long total, long errors, String error) {}
+    /** Reconcile shape for {@code GET /api/tagging/last}; {@code current} is the live detail. */
+    public record RunStatus(boolean running, long done, long total, long errors, String error,
+                            String current) {}
+
+    /**
+     * Fan-out for run transitions — no-ops by default. The SSE transport that used to
+     * sit behind this seam was removed (2026-11); the client polls the REST status.
+     */
+    public interface Events {
+
+        /** One progress snapshot (the live detail included — also the reconcile shape). */
+        record Progress(long done, long total, String current, long errors) {}
+
+        Events NOOP = new Events() {};
+
+        /** One progress event per applied entry. */
+        default void progress(long done, long total, String current, long errors) {}
+
+        default void done(long done, long total, long errors) {}
+
+        default void failed(String message) {}
+    }
 
     /**
      * One page of the scope's entry ids, strictly after {@code afterId} (null = from the
@@ -70,7 +94,7 @@ public class TaggingBackfill {
     private final EntryLookup lookup;
     private final PageSource queryPages;
     private final PageSource untaggedPages;
-    private final TaggingSseHub hub;
+    private final Events events;
     private final GpuJobGuard guard;
 
     private volatile boolean running;
@@ -79,27 +103,28 @@ public class TaggingBackfill {
     private volatile long total;
     private volatile long errors;
     private volatile String error;
+    private volatile String current;
 
     public TaggingBackfill(TaggingService tagging, JdbcTagStore store, EntryLookup lookup,
                            PageSource queryPages, PageSource untaggedPages) {
-        this(tagging, store, lookup, queryPages, untaggedPages, new TaggingSseHub(), new GpuJobGuard());
+        this(tagging, store, lookup, queryPages, untaggedPages, Events.NOOP, new GpuJobGuard());
     }
 
-    /** Test seam: a recording hub instead of the real SSE transport (own guard). */
+    /** Test seam: a recording listener instead of the (removed) SSE transport (own guard). */
     TaggingBackfill(TaggingService tagging, JdbcTagStore store, EntryLookup lookup,
-                    PageSource queryPages, PageSource untaggedPages, TaggingSseHub hub) {
-        this(tagging, store, lookup, queryPages, untaggedPages, hub, new GpuJobGuard());
+                    PageSource queryPages, PageSource untaggedPages, Events events) {
+        this(tagging, store, lookup, queryPages, untaggedPages, events, new GpuJobGuard());
     }
 
     /** Production seam: the SHARED GPU-job guard (mutual exclusion with the embedding backfill). */
     TaggingBackfill(TaggingService tagging, JdbcTagStore store, EntryLookup lookup,
-                    PageSource queryPages, PageSource untaggedPages, TaggingSseHub hub, GpuJobGuard guard) {
+                    PageSource queryPages, PageSource untaggedPages, Events events, GpuJobGuard guard) {
         this.tagging = tagging;
         this.store = store;
         this.lookup = lookup;
         this.queryPages = queryPages;
         this.untaggedPages = untaggedPages;
-        this.hub = hub;
+        this.events = events;
         this.guard = guard;
     }
 
@@ -127,6 +152,7 @@ public class TaggingBackfill {
             total = 0;
             errors = 0;
             error = null;
+            current = null;
             // per-run daemon thread, not a per-instance executor: the controller builds a
             // new instance per bulk POST, and a single-thread executor would park one idle
             // thread per run forever (final review I-1) — the runner is strictly single-job
@@ -164,14 +190,16 @@ public class TaggingBackfill {
                     // surface it: a silent skip lets backfill "complete" forever incomplete
                     LOG.warn("tagging backfill cannot resolve entry {} (deleted or unknown root); skipping", id);
                     done++;
-                    hub.progress(done, total, "#" + id, errors);
+                    current = "#" + id;
+                    events.progress(done, total, current, errors);
                     continue;
                 }
                 try {
                     TaggingService.Prediction p = tagging.predict(id, ref.absPath(), ref.kind(), null);
                     tagging.apply(id, p.tags().stream().map(TaggingService.PredictedTag::name).toList(), p);
                     done++;
-                    hub.progress(done, total, ref.absPath().getFileName().toString(), errors);
+                    current = ref.absPath().getFileName().toString();
+                    events.progress(done, total, current, errors);
                 } catch (TaggingUnavailableException e) {
                     errors++;
                     LOG.warn("tagging unavailable for entry {} ({}); waiting for the breaker", id, e.getMessage());
@@ -187,17 +215,17 @@ public class TaggingBackfill {
             }
             if (stopped) {
                 error = "tagging backfill stopped before completion";
-                hub.failed(error);
+                events.failed(error);
                 LOG.warn("tagging backfill ({}) stopped after {}/{} entries", scope, done, total);
             } else {
                 error = null;
-                hub.done(done, total, errors);
+                events.done(done, total, errors);
                 LOG.info("tagging backfill ({}{}) complete: {} entries tagged, {} errors",
                         scope, q == null || q.isBlank() ? "" : ", q=" + q, done, errors);
             }
         } catch (Exception e) {
             error = e.getMessage() == null ? e.toString() : e.getMessage();
-            hub.failed(error);
+            events.failed(error);
             LOG.warn("tagging backfill failed after {}: {}", done, error);
         } finally {
             running = false;
@@ -244,11 +272,7 @@ public class TaggingBackfill {
     }
 
     public RunStatus status() {
-        return new RunStatus(running, done, total, errors, error);
-    }
-
-    public TaggingSseHub hub() {
-        return hub;
+        return new RunStatus(running, done, total, errors, error, current);
     }
 
     /**

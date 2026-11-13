@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
-import { FakeEventSource } from 'src/test-support/fake-event-source';
 
 const apiGet = vi.fn();
 const apiPost = vi.fn();
@@ -13,96 +12,121 @@ vi.mock('src/boot/api', () => ({
 
 const { useImportStore } = await import('src/stores/importStore');
 
+/** shape helper — a running run as /api/imports/last answers it (with transient fields) */
+function runningRun(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 9,
+    status: 'running',
+    startedAt: '2026-11-13T10:00:00Z',
+    finishedAt: null,
+    scanned: 100,
+    added: 0,
+    updated: 0,
+    missingCount: 0,
+    errorCount: 0,
+    message: null,
+    processed: 40,
+    current: 'downloads/alpha/x.png',
+    ...overrides,
+  };
+}
+
 describe('import store', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     apiGet.mockReset();
     apiPost.mockReset();
-    vi.stubGlobal('EventSource', FakeEventSource);
+    vi.useFakeTimers();
   });
 
   afterEach(() => {
-    vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
 
-  it('connect subscribes and progress updates counters', () => {
+  it('startPolling reconciles immediately and keeps the fast cadence while a run is active', async () => {
+    apiGet.mockResolvedValue({ data: { run: runningRun() } });
     const store = useImportStore();
-    store.connect();
-    expect(FakeEventSource.last?.url).toBe('/api/imports/events');
+    store.startPolling();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(apiGet).toHaveBeenCalledWith('/api/imports/last');
+    expect(store.run!.processed).toBe(40);
+    expect(store.run!.current).toBe('downloads/alpha/x.png');
 
-    FakeEventSource.last!.emit('progress', {
-      runId: 1,
-      scanned: 10,
-      added: 7,
-      updated: 1,
-      missing: 2,
-      errors: 0,
-      current: 'alpha/x.png',
-    });
-    expect(store.run).not.toBeNull();
-    expect(store.run!.scanned).toBe(10);
-    expect(store.run!.added).toBe(7);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(apiGet).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(apiGet).toHaveBeenCalledTimes(2);
+    store.stopPolling();
   });
 
-  it('connect is idempotent — one EventSource per app session, not per mount', () => {
-    // review I6: remounting import UI must not leak one SSE connection per mount
-    // (HTTP/1.1 caps ~6 per host)
-    FakeEventSource.createdCount = 0;
-    FakeEventSource.all = [];
+  it('drops to the idle cadence once no run is active', async () => {
+    apiGet
+      .mockResolvedValueOnce({ data: { run: runningRun() } })
+      .mockResolvedValue({ data: { run: runningRun({ status: 'completed', processed: undefined, current: undefined }) } });
     const store = useImportStore();
-    store.connect();
-    store.connect();
-    store.connect();
-    expect(FakeEventSource.createdCount).toBe(1);
-  });
+    store.startPolling();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.run!.status).toBe('running');
 
-  it('done triggers a /api/imports/last reconcile (REST is the source of truth)', async () => {
-    apiGet.mockResolvedValue({
-      data: {
-        run: {
-          id: 1,
-          status: 'completed',
-          startedAt: '2026-11-08T10:00:00Z',
-          finishedAt: '2026-11-08T10:01:00Z',
-          scanned: 12,
-          added: 10,
-          updated: 1,
-          missingCount: 1,
-          errorCount: 0,
-          message: null,
-        },
-      },
-    });
-    const store = useImportStore();
-    store.connect();
-    FakeEventSource.last!.emit('done', { runId: 1, status: 'completed' });
-    await vi.waitFor(() => expect(apiGet).toHaveBeenCalledWith('/api/imports/last'));
+    await vi.advanceTimersByTimeAsync(1_000); // fast tick sees the completed run
+    expect(apiGet).toHaveBeenCalledTimes(2);
     expect(store.run!.status).toBe('completed');
-    expect(store.run!.added).toBe(10);
+
+    await vi.advanceTimersByTimeAsync(14_999); // …then backs off to the idle cadence
+    expect(apiGet).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(apiGet).toHaveBeenCalledTimes(3);
+    store.stopPolling();
   });
 
-  it('onerror marks disconnected and reconciles', async () => {
+  it('startPolling is idempotent — one poller per store, not per mount', async () => {
     apiGet.mockResolvedValue({ data: { run: null } });
     const store = useImportStore();
-    store.connect();
-    FakeEventSource.last!.onerror!();
-    expect(store.connected).toBe(false);
-    await vi.waitFor(() => expect(apiGet).toHaveBeenCalledWith('/api/imports/last'));
-    expect(store.run).toBeNull();
+    store.startPolling();
+    store.startPolling();
+    store.startPolling();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(apiGet).toHaveBeenCalledTimes(1);
+    store.stopPolling();
   });
 
-  it('startImport posts and reconciles (flag sent explicitly, off)', async () => {
-    apiPost.mockResolvedValue({ data: { runId: 9 } });
-    apiGet.mockResolvedValue({ data: { run: { id: 9, status: 'running', added: 0 } } });
+  it('stopPolling cancels pending passes', async () => {
+    apiGet.mockResolvedValue({ data: { run: null } });
     const store = useImportStore();
+    store.startPolling();
+    await vi.advanceTimersByTimeAsync(0);
+    store.stopPolling();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(apiGet).toHaveBeenCalledTimes(1);
+  });
+
+  it('a failed reconcile does not stop the poller', async () => {
+    apiGet.mockRejectedValueOnce(new Error('boom')).mockResolvedValue({ data: { run: null } });
+    const store = useImportStore();
+    store.startPolling();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(apiGet).toHaveBeenCalledTimes(2);
+    store.stopPolling();
+  });
+
+  it('startImport posts, then the nudged poll reconciles (flag sent explicitly, off)', async () => {
+    apiPost.mockResolvedValue({ data: { runId: 9 } });
+    apiGet.mockResolvedValue({ data: { run: runningRun({ processed: undefined, current: undefined }) } });
+    const store = useImportStore();
+    store.startPolling(); // the component starts polling on mount, before any click
+    await vi.advanceTimersByTimeAsync(0);
+    apiGet.mockClear();
     await store.startImport(false);
     expect(apiPost).toHaveBeenCalledWith('/api/imports', { createPool: false });
+    await vi.advanceTimersByTimeAsync(0); // the nudge's immediate pass
     expect(store.run!.id).toBe(9);
+    store.stopPolling();
   });
 
   it('startImport sends createPool: true when the pool follow-up is checked', async () => {
     apiPost.mockResolvedValue({ data: { runId: 9 } });
-    apiGet.mockResolvedValue({ data: { run: { id: 9, status: 'running', added: 0 } } });
+    apiGet.mockResolvedValue({ data: { run: runningRun() } });
     const store = useImportStore();
     await store.startImport(true);
     expect(apiPost).toHaveBeenCalledWith('/api/imports', { createPool: true });

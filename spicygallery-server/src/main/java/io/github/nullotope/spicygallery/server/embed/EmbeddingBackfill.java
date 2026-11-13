@@ -16,17 +16,21 @@ import org.springframework.stereotype.Service;
 /**
  * Embedding backfill (spec §3.2): embeds every entry missing vectors for the currently
  * configured model (model mismatch counts — Review Focus 2), batched pages of 50,
- * resumable by construction (re-running continues where rows exist). SSE progress
- * mirrors the import run's shape; REST status reconciles. Holds the shared GpuJobGuard
- * for the whole run (wired into {@code start}/the worker's finally) so the tagging bulk
- * run can never overlap it.
+ * resumable by construction (re-running continues where rows exist). Live progress is
+ * part of the REST status ({@code BackfillStatus.current}) and read by polling
+ * {@code GET /api/embeddings/backfill} — the SSE transport that used to push it was
+ * removed (it held a browser socket open per tab forever and starved the HTTP/1.1
+ * 6-connections-per-host pool). Holds the shared GpuJobGuard for the whole run (wired
+ * into {@code start}/the worker's finally) so the tagging bulk run can never overlap it.
  */
 @Service
 public class EmbeddingBackfill {
 
     public record EntryRef(long id, Kind kind, Path absPath) {}
 
-    public record BackfillStatus(boolean running, long done, long total, String error) {}
+    /** Reconcile shape for {@code GET /api/embeddings/backfill}; {@code current} is the live detail. */
+    public record BackfillStatus(boolean running, long done, long total, String error,
+                                 String current) {}
 
     /** Entry rows for a page of ids (seam over EntryQueries; DB-free tests inject a fake). */
     @FunctionalInterface
@@ -41,7 +45,6 @@ public class EmbeddingBackfill {
     private final EmbeddingStore store;
     private final EntryLookup lookup;
     private final GpuJobGuard guard;
-    private final BackfillSseHub hub = new BackfillSseHub();
     private final ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "embedding-backfill");
         t.setDaemon(true);
@@ -52,6 +55,7 @@ public class EmbeddingBackfill {
     private volatile long done;
     private volatile long total;
     private volatile String error;
+    private volatile String current;
 
     public EmbeddingBackfill(EmbeddingService embeddings, EmbeddingStore store, EntryLookup lookup,
                              GpuJobGuard guard) {
@@ -76,6 +80,7 @@ public class EmbeddingBackfill {
             done = 0;
             total = 0;
             error = null;
+            current = null;
             if (force) {
                 store.deleteAll();
             }
@@ -110,7 +115,7 @@ public class EmbeddingBackfill {
                     }
                     embeddings.embedEntry(id, ref.absPath(), ref.kind());
                     done++;
-                    hub.progress(done, total, ref.absPath().getFileName().toString());
+                    current = ref.absPath().getFileName().toString();
                 }
                 if (page.nextCursor() == null) {
                     break;
@@ -118,11 +123,9 @@ public class EmbeddingBackfill {
                 cursor = page.nextCursor();
             }
             error = null;
-            hub.done(done, total);
             LOG.info("embedding backfill complete: {} entries", done);
         } catch (Exception e) {
             error = e.getMessage() == null ? e.toString() : e.getMessage();
-            hub.failed(error);
             LOG.warn("embedding backfill failed after {}: {}", done, error);
         } finally {
             running = false;
@@ -131,11 +134,7 @@ public class EmbeddingBackfill {
     }
 
     public BackfillStatus status() {
-        return new BackfillStatus(running, done, total, error);
-    }
-
-    public BackfillSseHub hub() {
-        return hub;
+        return new BackfillStatus(running, done, total, error, current);
     }
 
     /** Test seam: wait for the single-threaded job to finish. */

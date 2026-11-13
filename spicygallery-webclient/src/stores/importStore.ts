@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia';
 import { api } from 'src/boot/api';
+import { createRunPoller, type RunPoller } from 'src/composables/run-poller';
 
 export interface RunDto {
   id: number;
@@ -14,90 +15,46 @@ export interface RunDto {
   message: string | null;
   /** id of the pool drafted from this run's new imports, if any (slice6) */
   poolId?: number | null;
-  /** transient SSE progress fields — not persisted on the run row (REST reconcile omits them) */
+  /** transient live-progress fields — present only while the run is active */
   processed?: number;
   current?: string | null;
 }
 
-interface ProgressStats {
-  scanned: number;
-  processed: number;
-  added: number;
-  updated: number;
-  missing: number;
-  errors: number;
-  current: string | null;
-}
-
 /**
- * Import run state. SSE notifies, REST reconciles (single-mapper rule):
- * onerror and done always refetch /api/imports/last.
+ * Import run state. Polled, not pushed: the SSE transport held one browser socket
+ * open per tab forever and starved the HTTP/1.1 6-connections-per-host pool. REST
+ * stays the source of truth (spec §8) — the poller reconciles /api/imports/last at
+ * a fast cadence while a run is active and a slow one otherwise (paused entirely
+ * for background tabs; see run-poller).
  */
 export const useImportStore = defineStore('import', {
   state: () => ({
     run: null as RunDto | null,
-    connected: false,
-    /** One EventSource per app session — ImportControls lives in App.vue and
-     *  mounts once; the guard also protects against accidental double connects
-     *  (review I6). */
-    source: null as EventSource | null,
+    poller: null as RunPoller | null,
   }),
   actions: {
-    connect() {
-      if (this.source) {
+    /** Idempotent: one poller per app session regardless of mount count. */
+    startPolling() {
+      if (this.poller) {
+        this.poller.start();
         return;
       }
-      const source = new EventSource('/api/imports/events');
-      this.source = source;
-      source.onopen = () => {
-        this.connected = true;
-      };
-      source.addEventListener('progress', (event) => {
-        const stats = JSON.parse((event as MessageEvent).data) as ProgressStats;
-        const base: RunDto = this.run ?? {
-          // the server's ImportStats carries no runId — the id comes from REST reconcile
-          id: 0,
-          status: 'running',
-          startedAt: new Date().toISOString(),
-          finishedAt: null,
-          scanned: 0,
-          added: 0,
-          updated: 0,
-          missingCount: 0,
-          errorCount: 0,
-          message: null,
-        };
-        this.run = {
-          ...base,
-          status: 'running',
-          scanned: stats.scanned,
-          processed: stats.processed,
-          added: stats.added,
-          updated: stats.updated,
-          missingCount: stats.missing,
-          errorCount: stats.errors,
-          current: stats.current,
-        };
-      });
-      source.addEventListener('done', () => {
-        void this.reconcile();
-      });
-      source.addEventListener('failed', () => {
-        void this.reconcile();
-      });
-      source.onerror = () => {
-        this.connected = false;
-        void this.reconcile();
-      };
+      this.poller = createRunPoller({ work: () => this.reconcile() });
+      this.poller.start();
     },
-    /** REST reconcile — the source of truth (spec §8). */
-    async reconcile() {
+    stopPolling() {
+      this.poller?.stop();
+    },
+    /** REST reconcile — the source of truth (spec §8). Resolves to whether a run
+     *  is active (drives the poller's cadence). */
+    async reconcile(): Promise<boolean> {
       const { data } = await api.get<{ run: RunDto | null }>('/api/imports/last');
       this.run = data.run;
+      return data.run?.status === 'running';
     },
     async startImport(createPool: boolean) {
       await api.post('/api/imports', { createPool });
-      await this.reconcile();
+      this.poller?.nudge(); // immediate progress read + fast cadence from here
     },
   },
 });

@@ -51,7 +51,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useTaggingStore } from 'src/stores/tagging';
 
 const store = useTaggingStore();
@@ -73,8 +73,8 @@ async function start() {
 }
 
 onMounted(() => {
-  store.connect(); // SSE notifies… (one EventSource per app session — store guard)
-  void store.reconcile(); // …REST reconciles (spec §8)
+  store.startPolling(); // REST reconciles (spec §8) — fast while a run is active
   void store.refreshInfo(); // the store never fetches info on its own
 });
+onBeforeUnmount(() => store.stopPolling());
 </script>

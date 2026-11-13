@@ -2,17 +2,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { flushPromises, mount } from '@vue/test-utils';
 import { createPinia } from 'pinia';
 import { Quasar } from 'quasar';
-import { FakeEventSource } from 'src/test-support/fake-event-source';
 import type { RunDto } from 'src/stores/tagging';
 
+const apiGet = vi.fn();
 const apiPost = vi.fn();
 let lastRun: { data: RunDto } = {
   data: { running: false, done: 0, total: 0, errors: 0, error: null },
 };
 vi.mock('src/boot/api', () => ({
   api: {
-    get: (url: string) =>
-      url === '/api/tagging/last' ? Promise.resolve(lastRun) : Promise.resolve({ data: null }),
+    get: (url: string) => {
+      apiGet(url);
+      return url === '/api/tagging/last'
+        ? Promise.resolve(lastRun)
+        : Promise.resolve({ data: null });
+    },
     post: (...args: unknown[]) => apiPost(...args),
   },
 }));
@@ -26,8 +30,10 @@ function mountControls(pinia = createPinia()) {
   });
 }
 
-function emitProgress(stats: { done: number; total: number; current: string | null; errors: number }) {
-  FakeEventSource.last?.emit('progress', stats);
+/** one poll pass after the poller scheduled its next tick (idle cadence) */
+async function pollTick() {
+  await vi.advanceTimersByTimeAsync(15_000);
+  await flushPromises();
 }
 
 function dialogEl(): HTMLElement | null {
@@ -36,15 +42,14 @@ function dialogEl(): HTMLElement | null {
 
 describe('TaggingControls — sidebar bulk actions + seamless progress dialog', () => {
   beforeEach(() => {
-    FakeEventSource.last = null;
-    FakeEventSource.all = [];
-    FakeEventSource.createdCount = 0;
     lastRun = { data: { running: false, done: 0, total: 0, errors: 0, error: null } };
-    vi.stubGlobal('EventSource', FakeEventSource);
+    apiGet.mockClear();
+    apiPost.mockClear();
+    vi.useFakeTimers();
   });
 
   afterEach(() => {
-    vi.unstubAllGlobals();
+    vi.useRealTimers();
     document.querySelectorAll('.q-dialog').forEach((el) => el.remove()); // q-dialog teleports to body
   });
 
@@ -75,11 +80,10 @@ describe('TaggingControls — sidebar bulk actions + seamless progress dialog', 
   });
 
   it('seamless bottom dialog auto-opens with live counters and the current entry', async () => {
+    // a run already active when the page loads (e.g. reload mid-run) — the mount-time
+    // poll sees it and opens the monitor
+    lastRun = { data: { running: true, done: 2, total: 10, errors: 1, error: null, current: 'duck.jpg' } };
     mountControls();
-    await flushPromises();
-    expect(dialogEl()).toBeNull();
-
-    emitProgress({ done: 2, total: 10, current: 'duck.jpg', errors: 1 });
     await flushPromises();
 
     const dialog = dialogEl();
@@ -91,9 +95,8 @@ describe('TaggingControls — sidebar bulk actions + seamless progress dialog', 
   });
 
   it('dismissed dialog reopens from a button while the run is active — no second start', async () => {
+    lastRun = { data: { running: true, done: 2, total: 10, errors: 0, error: null, current: 'duck.jpg' } };
     const wrapper = mountControls();
-    await flushPromises();
-    emitProgress({ done: 2, total: 10, current: 'duck.jpg', errors: 0 });
     await flushPromises();
     expect(dialogEl()).not.toBeNull();
 
@@ -109,16 +112,13 @@ describe('TaggingControls — sidebar bulk actions + seamless progress dialog', 
   });
 
   it('shows the final report when the run completes, until dismissed', async () => {
+    lastRun = { data: { running: true, done: 2, total: 10, errors: 0, error: null, current: 'duck.jpg' } };
     mountControls();
     await flushPromises();
-    const source = FakeEventSource.last;
-    expect(source).not.toBeNull();
-    emitProgress({ done: 2, total: 10, current: 'duck.jpg', errors: 0 });
-    await flushPromises();
+    expect(dialogEl()).not.toBeNull();
 
     lastRun = { data: { running: false, done: 10, total: 10, errors: 2, error: null } };
-    source!.emit('done', {});
-    await flushPromises();
+    await pollTick();
 
     const dialog = dialogEl();
     expect(dialog).not.toBeNull();
@@ -128,14 +128,12 @@ describe('TaggingControls — sidebar bulk actions + seamless progress dialog', 
   });
 
   it('shows the run error message on a failed run', async () => {
+    lastRun = { data: { running: true, done: 3, total: 10, errors: 2, error: null, current: 'cat.jpg' } };
     mountControls();
-    await flushPromises();
-    emitProgress({ done: 3, total: 10, current: 'cat.jpg', errors: 2 });
     await flushPromises();
 
     lastRun = { data: { running: false, done: 3, total: 10, errors: 2, error: 'provider down' } };
-    FakeEventSource.last!.emit('failed', {});
-    await flushPromises();
+    await pollTick();
 
     const dialog = dialogEl();
     expect(dialog).not.toBeNull();
@@ -169,13 +167,14 @@ describe('TaggingControls — sidebar bulk actions + seamless progress dialog', 
     expect(wrapper.find('[data-testid="tag-notice"]').text()).toContain('could not start');
   });
 
-  it('keeps one EventSource per app session (store guard)', async () => {
+  it('keeps one poller per app session across mounts (store guard)', async () => {
     const pinia = createPinia();
     mountControls(pinia);
     await flushPromises();
     mountControls(pinia);
     await flushPromises();
-    expect(FakeEventSource.createdCount).toBe(1);
-    expect(FakeEventSource.last?.url).toBe('/api/tagging/events');
+    // one immediate reconcile from the first mount's poller start — the second
+    // mount's startPolling is idempotent and does not re-poll
+    expect(apiGet).toHaveBeenCalledTimes(1);
   });
 });

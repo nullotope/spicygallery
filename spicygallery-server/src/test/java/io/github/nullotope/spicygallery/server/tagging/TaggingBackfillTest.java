@@ -47,7 +47,7 @@ class TaggingBackfillTest extends PostgresBase {
     private final AtomicInteger providerCalls = new AtomicInteger();
     private final AtomicReference<String> providerFailsFor = new AtomicReference<>();
     private final AtomicReference<String> readerFailsFor = new AtomicReference<>();
-    private final RecordingHub hub = new RecordingHub();
+    private final RecordingEvents hub = new RecordingEvents();
     private final FakePages pages = new FakePages();
     private TaggingService tagging;
     private TaggingBackfill backfill;
@@ -180,10 +180,10 @@ class TaggingBackfillTest extends PostgresBase {
         }
     }
 
-    /** Records emitted events; the SSE transport itself is Spring's (ImportSseHub pattern). */
-    static final class RecordingHub extends TaggingSseHub {
-        final List<TaggingSseHub.Progress> progress = new ArrayList<>();
-        final List<TaggingSseHub.Progress> doneEvents = new ArrayList<>();
+    /** Records emitted events; the REST status carries the same live detail (poll transport). */
+    static final class RecordingEvents implements TaggingBackfill.Events {
+        final List<TaggingBackfill.Events.Progress> progress = new ArrayList<>();
+        final List<TaggingBackfill.Events.Progress> doneEvents = new ArrayList<>();
         final List<String> failed = new ArrayList<>();
 
         void reset() {
@@ -194,12 +194,12 @@ class TaggingBackfillTest extends PostgresBase {
 
         @Override
         public void progress(long done, long total, String current, long errors) {
-            progress.add(new TaggingSseHub.Progress(done, total, current, errors));
+            progress.add(new TaggingBackfill.Events.Progress(done, total, current, errors));
         }
 
         @Override
         public void done(long done, long total, long errors) {
-            doneEvents.add(new TaggingSseHub.Progress(done, total, null, errors));
+            doneEvents.add(new TaggingBackfill.Events.Progress(done, total, null, errors));
         }
 
         @Override
@@ -228,6 +228,7 @@ class TaggingBackfillTest extends PostgresBase {
         assertEquals(1, s.errors());
         assertEquals(5, s.total());
         assertNull(s.error(), "a per-entry failure must not fail the job");
+        assertEquals("e5.png", s.current(), "the last applied entry's file name is the live detail");
         assertTrue(hub.failed.isEmpty());
         assertEquals(4, hub.progress.size(), "one progress event per applied entry");
         assertEquals(4, hub.progress.get(3).done());

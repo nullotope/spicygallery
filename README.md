@@ -9,7 +9,7 @@ libraries are mounted read-only and the index is fully rebuildable.
 
 Built as a modular monolith: a pure-Java core (`spicygallery-core`: scanners,
 kind handlers, import pipeline), a Spring Boot server (`spicygallery-server`:
-REST + SSE + JDBC + the SPA in the jar), and a Quasar/Vite SPA
+REST + JDBC + the SPA in the jar), and a Quasar/Vite SPA
 (`spicygallery-webclient`).
 
 ## Run (development)
@@ -66,8 +66,8 @@ instead of aborting the run.
   walks stay O(page) — no OFFSET)
 - `GET /api/entries/{id}` · `/neighbors?q=&kind=` · `/file` (Range + ETag) ·
   `/thumb` (immutable, `?v=` versioned)
-- `POST /api/imports` → 202; `GET /api/imports/last` (reconcile);
-  `GET /api/imports/events` (SSE progress)
+- `POST /api/imports` → 202; `GET /api/imports/last` (reconcile — polled by the
+  client at a fast cadence while a run is active; carries live progress)
 - `GET /api/system/info` — libraries, ffmpeg/ffprobe detection, workers
 
 ## Tests

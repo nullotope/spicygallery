@@ -3,7 +3,6 @@ import { mount, flushPromises } from '@vue/test-utils';
 import { createPinia } from 'pinia';
 import { h } from 'vue';
 import { Quasar } from 'quasar';
-import { FakeEventSource } from 'src/test-support/fake-event-source';
 
 const apiGet = vi.fn();
 vi.mock('src/boot/api', () => ({
@@ -68,8 +67,6 @@ describe('EntriesPage', () => {
   beforeEach(() => {
     apiGet.mockReset();
     apiGet.mockResolvedValue(gridPage([7, 3, 1]));
-    FakeEventSource.last = null;
-    vi.stubGlobal('EventSource', FakeEventSource);
   });
 
   afterEach(() => {

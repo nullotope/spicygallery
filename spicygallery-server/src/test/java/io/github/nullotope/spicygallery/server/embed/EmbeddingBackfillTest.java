@@ -125,6 +125,9 @@ class EmbeddingBackfillTest extends PostgresBase {
         assertEquals(3, status.total());
         assertEquals(3, store.countWithModel("m1"));
         assertNull(status.error());
+        // the transient live-progress detail survives into the reconcile shape — the last
+        // entry the run embedded (polling transport; the SSE stream is gone)
+        assertEquals("c.png", status.current());
     }
 
     @Test

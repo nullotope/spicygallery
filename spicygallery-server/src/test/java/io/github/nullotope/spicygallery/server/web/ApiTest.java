@@ -315,7 +315,7 @@ class ApiTest extends PostgresBase {
     }
 
     @Test
-    void import_start_conflict_last_and_events() throws Exception {
+    void import_start_conflict_and_last() throws Exception {
         MvcResult started = mvc.perform(post("/api/imports"))
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.runId").isNumber())
@@ -327,11 +327,14 @@ class ApiTest extends PostgresBase {
                 .andExpect(jsonPath("$.runId").isNumber());
 
         mvc.perform(get("/api/imports/last")).andExpect(status().isOk())
-                .andExpect(jsonPath("$.run.status").value("running"));
+                .andExpect(jsonPath("$.run.status").value("running"))
+                // transient live progress rides along while the run is active (polling
+                // transport — the SSE stream that used to carry this is gone)
+                .andExpect(jsonPath("$.run.processed").isNumber());
 
-        // SSE endpoint subscribes (async request started; the stream stays open)
-        mvc.perform(get("/api/imports/events"))
-                .andExpect(request().asyncStarted());
+        // the SSE transport is removed (it held a browser socket open per tab forever
+        // and starved the HTTP/1.1 6-connections-per-host pool)
+        mvc.perform(get("/api/imports/events")).andExpect(status().isNotFound());
 
         // wait for completion (bulk ingest of 102 files)
         String body;
@@ -345,6 +348,11 @@ class ApiTest extends PostgresBase {
                     .readTree(body).get("run").get("status").asText();
         } while (status.equals("running"));
         org.junit.jupiter.api.Assertions.assertEquals("completed", status);
+
+        // the transient live-progress fields ride along ONLY while the run is active
+        mvc.perform(get("/api/imports/last")).andExpect(status().isOk())
+                .andExpect(jsonPath("$.run.processed").doesNotExist())
+                .andExpect(jsonPath("$.run.current").doesNotExist());
     }
 
     @Test

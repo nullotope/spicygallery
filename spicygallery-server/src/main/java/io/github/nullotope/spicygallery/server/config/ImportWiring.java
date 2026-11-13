@@ -53,4 +53,15 @@ public class ImportWiring {
                 roots, handlers, sink, Path.of(props.appData()), props.workers(), reporter,
                 (id, absPath, kind) -> embeddingService.embedEntry(id.value(), absPath, kind));
     }
+
+    /**
+     * No-op run-events fan-out: the SSE transport was removed (it held a browser socket
+     * open per tab forever and starved the HTTP/1.1 6-connections-per-host pool) —
+     * progress is polled via {@code GET /api/imports/last}. The seam stays for tests
+     * and future subscribers.
+     */
+    @Bean
+    public io.github.nullotope.spicygallery.server.importjob.ImportRunEvents importRunEvents() {
+        return io.github.nullotope.spicygallery.server.importjob.ImportRunEvents.NOOP;
+    }
 }

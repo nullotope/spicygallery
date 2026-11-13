@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { flushPromises, mount } from '@vue/test-utils';
 import { createPinia } from 'pinia';
 import { Quasar } from 'quasar';
-import { FakeEventSource } from 'src/test-support/fake-event-source';
 import type { TaggingInfo } from 'src/types/tagging';
 
 const apiGet = vi.fn();
@@ -32,10 +31,6 @@ describe('TaggingPanel — settings page autotagging section', () => {
   beforeEach(() => {
     apiGet.mockReset();
     apiPost.mockReset();
-    FakeEventSource.last = null;
-    FakeEventSource.all = [];
-    FakeEventSource.createdCount = 0;
-    vi.stubGlobal('EventSource', FakeEventSource);
     apiGet.mockImplementation((url: string) => {
       if (url === '/api/tagging/info') return Promise.resolve({ data: info });
       if (url === '/api/tagging/last') {

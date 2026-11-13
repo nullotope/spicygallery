@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { flushPromises, mount } from '@vue/test-utils';
 import { createPinia } from 'pinia';
 import { Quasar } from 'quasar';
-import { FakeEventSource } from 'src/test-support/fake-event-source';
 
 const apiGet = vi.fn();
 const apiPost = vi.fn();
@@ -46,22 +45,24 @@ function mountPage() {
 
 describe('SettingsPage — embeddings', () => {
   let counts: { withEmbeddings: number; missing: number };
+  let backfill: { running: boolean; done: number; total: number; error: string | null; current?: string | null };
 
   beforeEach(() => {
     apiGet.mockReset();
     apiPost.mockReset();
-    FakeEventSource.last = null;
-    FakeEventSource.all = [];
-    vi.stubGlobal('EventSource', FakeEventSource);
     counts = { withEmbeddings: 5, missing: 2 };
+    backfill = { running: false, done: 0, total: 0, error: null };
     apiGet.mockImplementation((url: string) => {
       if (url === '/api/system/info') return Promise.resolve({ data: systemInfo });
       if (url === '/api/imports/last') return Promise.resolve({ data: { run: null } });
+      if (url === '/api/tagging/last') {
+        return Promise.resolve({ data: { running: false, done: 0, total: 0, errors: 0, error: null } });
+      }
       if (url === '/api/embeddings/status') {
         return Promise.resolve(status({ withEmbeddings: counts.withEmbeddings, missing: counts.missing }));
       }
       if (url === '/api/embeddings/backfill') {
-        return Promise.resolve({ data: { running: false, done: 0, total: 0, error: null } });
+        return Promise.resolve({ data: backfill });
       }
       return Promise.resolve({ data: null });
     });
@@ -84,33 +85,40 @@ describe('SettingsPage — embeddings', () => {
     expect(wrapper.find('[data-testid="reembed-btn"]').exists()).toBe(true);
   });
 
-  it('backfill button posts, SSE drives progress, done reconciles', async () => {
-    const wrapper = mountPage();
-    await flushPromises();
-    const btn = wrapper.find('[data-testid="backfill-btn"]');
-    expect(btn.attributes('disabled')).toBeUndefined();
-    await btn.trigger('click');
-    expect(apiPost).toHaveBeenCalledTimes(1);
-    expect(apiPost.mock.calls[0]![0]).toBe('/api/embeddings/backfill');
-    // running: button disabled, progress bar appears
-    await flushPromises();
-    expect(wrapper.find('[data-testid="backfill-btn"]').attributes('disabled')).toBeDefined();
-    expect(wrapper.find('[data-testid="backfill-progress"]').exists()).toBe(true);
+  it('backfill button posts, polling drives progress, done reconciles', async () => {
+    vi.useFakeTimers();
+    try {
+      const wrapper = mountPage();
+      await flushPromises();
+      const btn = wrapper.find('[data-testid="backfill-btn"]');
+      expect(btn.attributes('disabled')).toBeUndefined();
+      backfill = { running: true, done: 0, total: 3, error: null };
+      await btn.trigger('click');
+      expect(apiPost).toHaveBeenCalledTimes(1);
+      expect(apiPost.mock.calls[0]![0]).toBe('/api/embeddings/backfill');
+      // running: button disabled, progress bar appears (optimistic + nudged poll)
+      await flushPromises();
+      expect(wrapper.find('[data-testid="backfill-btn"]').attributes('disabled')).toBeDefined();
+      expect(wrapper.find('[data-testid="backfill-progress"]').exists()).toBe(true);
 
-    const es = FakeEventSource.findByUrl('/api/embeddings/backfill/events')!;
-    expect(es.url).toBe('/api/embeddings/backfill/events');
-    es.emit('progress', { done: 1, total: 3, current: 'a.png' });
-    await flushPromises();
-    expect(wrapper.find('[data-testid="backfill-progress"]').exists()).toBe(true);
-    expect(wrapper.find('[data-testid="backfill-counts"]').text()).toContain('1 / 3');
+      // a progress pass at the fast cadence while the run is active
+      backfill = { running: true, done: 1, total: 3, error: null, current: 'a.png' };
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flushPromises();
+      expect(wrapper.find('[data-testid="backfill-progress"]').exists()).toBe(true);
+      expect(wrapper.find('[data-testid="backfill-counts"]').text()).toContain('1 / 3');
 
-    // the server reconciles to all-embedded on done
-    counts = { withEmbeddings: 7, missing: 0 };
-    es.emit('done', { done: 3, total: 3 });
-    await flushPromises();
-    // reconciled: running cleared, button re-enabled, counts updated
-    expect(wrapper.find('[data-testid="backfill-btn"]').attributes('disabled')).toBeUndefined();
-    expect(wrapper.find('[data-testid="embeddings"]').text()).toContain('7'); // 5+2 now embedded
+      // the server reconciles to all-embedded on completion
+      counts = { withEmbeddings: 7, missing: 0 };
+      backfill = { running: false, done: 3, total: 3, error: null };
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flushPromises();
+      // reconciled: running cleared, button re-enabled, counts updated
+      expect(wrapper.find('[data-testid="backfill-btn"]').attributes('disabled')).toBeUndefined();
+      expect(wrapper.find('[data-testid="embeddings"]').text()).toContain('7'); // 5+2 now embedded
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('409 while running shows a message', async () => {
