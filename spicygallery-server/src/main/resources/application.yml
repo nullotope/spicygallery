@@ -1,0 +1,44 @@
+server:
+  port: 8080
+
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/spicygallery
+    username: spicygallery
+    password: spicygallery
+
+spicygallery:
+  # named, read-only library roots; identity key = name (stable!)
+  # env override: SPICYGALLERY_LIBRARIES_0_NAME=…, _0_ROOT=…, _1_…
+  libraries:
+    - name: library
+      root: /media/library
+    - name: exports
+      root: /media/exports
+  app-data: ./data            # SPICYGALLERY_APPDATA (thumbnails; writable volume)
+  ffmpeg-path: ffmpeg         # resolved: configured path → PATH
+  ffprobe-path: ffprobe
+  workers: 4
+  # Embeddings (slice 3) — every value below IS the default (see SpicyGalleryProperties.Embedding);
+  # listed here so the tunables are discoverable. Enable by starting the optional
+  # provider: docker compose --profile embeddings up (or point base-url at llama-swap).
+  # embedding:
+  #   base-url: http://embedding:8080/v1   # SPICYGALLERY_EMBEDDING_BASE_URL
+  #   model: embeddinggemma-2              # SPICYGALLERY_EMBEDDING_MODEL
+  #   api-key: null                        # SPICYGALLERY_EMBEDDING_API_KEY (bearer when set)
+  #   batch-size: 8                        # inputs per provider request
+  #   max-frames: 64                       # video frames embedded per entry (1 fps)
+  #   image-max-side: 1024                 # original downscale cap before embedding
+  #   failure-cooldown-seconds: 300        # circuit-breaker open window
+  #   timeout-seconds: 60                  # provider HTTP timeout
+  # Tagging (slice 4) — every value below IS the default (see SpicyGalleryProperties.Tagging);
+  # listed here so the tunables are discoverable. Provider runs as the llama-swap upstream
+  # `hydra-3.5`.
+  # tagging:
+  #   enabled: true                        # SPICYGALLERY_TAGGING_ENABLED
+  #   base-url: http://host.docker.internal:9292/upstream/hydra-3.5   # SPICYGALLERY_TAGGING_BASE_URL
+  #   model: hydra-3.5                     # SPICYGALLERY_TAGGING_MODEL
+  #   calibration: f1.0@0.1                # SPICYGALLERY_TAGGING_CALIBRATION
+  #   implications: inherit                # SPICYGALLERY_TAGGING_IMPLICATIONS
+  #   concurrency: 4                       # SPICYGALLERY_TAGGING_CONCURRENCY — reserved — bulk runs serial in slice 4
+  #   failure-cooldown-seconds: 300        # SPICYGALLERY_TAGGING_FAILURE_COOLDOWN_SECONDS (circuit-breaker open window)

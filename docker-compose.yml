@@ -1,0 +1,111 @@
+# SpicyGallery — production-style deployment: Postgres 17 + the app jar image.
+# Media is bind-mounted READ-ONLY; the gallery never writes to your library.
+#
+#   MEDIA_DIR=/path/to/library docker compose up --build
+# The default media root is ./dev-media (gitignored) — a scratch library for
+# development. The PROD instance is a separate, gitignored file:
+#   docker-compose.prod.yml  (its own project/containers/volumes/ports)
+#
+services:
+  # pgvector-capable Postgres 17 (slice 3). Same PG major version as the old
+  # postgres:17-alpine, so an existing pgdata volume is reused in place and the V3
+  # `create extension vector` migration applies on first boot — no data rebuild.
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: spicygallery
+      POSTGRES_USER: spicygallery
+      POSTGRES_PASSWORD: spicygallery
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spicygallery -d spicygallery"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    # localhost-only: reachable for `./run.sh` (host jar ↔ dev db); the prod
+    # app talks to the db over the compose network, never from outside.
+    # DB_HOST_PORT: override when 5432 is taken on the host (run.sh matches).
+    ports:
+      - "127.0.0.1:${DB_HOST_PORT:-5432}:5432"
+
+  app:
+    build: .
+    ports:
+      - "${HOST_PORT:-8080}:8080"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/spicygallery
+      SPRING_DATASOURCE_USERNAME: spicygallery
+      SPRING_DATASOURCE_PASSWORD: spicygallery
+      SPICYGALLERY_LIBRARIES_0_NAME: library
+      SPICYGALLERY_LIBRARIES_0_ROOT: /media/library
+      # Boot relaxed binding: env name for `spicygallery.app-data` (dashes removed)
+      SPICYGALLERY_APPDATA: /data
+      # GPU embedding via the host's llama-swap (embeddinggemma-2 entry, --n-gpu-layers
+      # auto). The compose `embedding` service below is the CPU fallback — remove this
+      # block (and extra_hosts) to fall back to it.
+      SPICYGALLERY_EMBEDDING_BASE_URL: http://host.docker.internal:9292/v1
+      # Tagging (slice 4) — every value below IS the default (SpicyGalleryProperties.Tagging);
+      # uncomment to override. Provider runs as the llama-swap upstream `hydra-3.5`
+      # (configure llama-swap with an upstream named hydra-3.5).
+      # SPICYGALLERY_TAGGING_ENABLED: true
+      # SPICYGALLERY_TAGGING_BASE_URL: http://host.docker.internal:9292/upstream/hydra-3.5
+      # SPICYGALLERY_TAGGING_MODEL: hydra-3.5
+      # SPICYGALLERY_TAGGING_CALIBRATION: f1.0@0.1
+      # SPICYGALLERY_TAGGING_IMPLICATIONS: inherit
+      # SPICYGALLERY_TAGGING_CONCURRENCY: 4   # reserved — bulk runs serial in slice 4
+      # SPICYGALLERY_TAGGING_FAILURE_COOLDOWN_SECONDS: 300   # circuit-breaker open window
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - appdata:/data
+      - ${MEDIA_DIR:-./dev-media}:/media/library:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      # NOTE: the embedding provider is OPTIONAL (profile-gated, see below). It is
+      # deliberately NOT a depends_on — without it the app still boots; the circuit
+      # breaker trips and similar:/Related degrade to 503/empty. Start it with:
+      #   docker compose --profile embeddings up --build
+
+  # Optional multimodal embedding provider (slice 3): EmbeddingGemma-2 via llama.cpp,
+  # OpenAI-compatible /v1/embeddings on :8080. The app's default
+  # spicygallery.embedding.base-url is http://embedding:8080/v1, so no app env change
+  # is needed. Verified flags (Task 1 live probe): -hf pulls the Q8_0 model + mmproj
+  # into the container cache (persisted on the `models` volume); --embeddings is
+  # MANDATORY or the endpoint returns 501; --no-context-shift avoids truncation of
+  # long prompts. Model name field is ignored by llama.cpp.
+  #
+  # This service runs CPU-ONLY (embeddings are one-shot per entry — ~222 entries in
+  # ~5 min — so it is an acceptable fallback). GPU serving is meant to come from the
+  # host's llama-swap instead: add an `embeddinggemma-2` entry there (llama-server
+  # with --mmproj + --embeddings --n-gpu-layers auto, GGUF+mmproj under /llms) and
+  # point the app at it with
+  #   SPICYGALLERY_EMBEDDING_BASE_URL: http://host.docker.internal:9292/v1
+  # plus app-side extra_hosts: ["host.docker.internal:host-gateway"].
+  # Self-contained GPU alternative: image ghcr.io/ggml-org/llama.cpp:server-cuda with
+  #   gpus: all (deploy.resources.reservations.devices).
+  embedding:
+    # digest pinned to the build live-verified in slice 3 (tag floats upstream)
+    image: ghcr.io/ggml-org/llama.cpp:server@sha256:ca40726778c25a7fadce42c09bada8484eab22e28bc283bdbf212e87b1555390
+    profiles: ["embeddings"]
+    volumes:
+      - models:/root/.cache/huggingface
+    command:
+      - -hf
+      - ggml-org/embeddinggemma-2-GGUF:Q8_0
+      - --embeddings
+      - --no-context-shift
+      - --port
+      - "8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 120s
+
+volumes:
+  pgdata:
+  appdata:
+  models:

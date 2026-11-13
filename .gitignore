@@ -1,0 +1,23 @@
+# Build output
+target/
+
+# Frontend
+node_modules/
+spicygallery-webclient/node/
+spicygallery-webclient/dist/
+spicygallery-webclient/.quasar/
+
+# Runtime data (thumbnails/app data, media mounts)
+data/
+media/
+dev-media/
+
+# Prod instance config (machine-specific, never committed)
+docker-compose.prod.yml
+
+# Editors / OS
+*.log
+.idea/
+
+# serena language-server cache/config
+.serena/

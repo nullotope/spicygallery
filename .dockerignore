@@ -1,0 +1,11 @@
+.git
+**/target
+!spicygallery-server/target/spicygallery-server-*.jar
+**/node_modules
+spicygallery-webclient/dist
+spicygallery-webclient/.quasar
+data
+media
+.superpowers
+docs
+scripts

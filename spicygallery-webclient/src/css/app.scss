@@ -1,0 +1,110 @@
+/* SpicyGallery global styles — uniform thumbnail grid (mockup) + light/dark themes.
+   Dark mode rides Quasar's body--dark class (set by the Dark plugin); these are the
+   overrides for our custom surfaces — everything Quasar-native adapts by itself. */
+
+/* --- header + sidebar surfaces --- */
+/* Tight, theme-tuned shadow instead of Quasar's `elevated` gradient — the default
+   cast a grey band over the dark sidebar (wrong grey for the top edge). Plain
+   class selectors: app.scss loads after Quasar's css, so the tie goes to us. */
+.app-header {
+  background: #f2f2f2;
+  color: #1a1a1a;
+  border-bottom: 1px solid #ddd;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+.body--dark .app-header {
+  background: #1d1d1d;
+  color: #e0e0e0;
+  border-bottom-color: #333;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+}
+
+.sidebar {
+  background: #f3f3f3;
+}
+.entries-sidebar {
+  border-right: 1px solid #ddd;
+}
+.body--dark .sidebar {
+  background: #191919;
+}
+.body--dark .entries-sidebar {
+  border-right-color: #333;
+}
+
+/* --- grid tiles --- */
+
+/* Uniform tiles: every thumb renders in the same 4:3 box (object-fit: cover
+   center-crops). The mockup is the visual reference for the grid. */
+.tile-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.tile {
+  display: block;
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  overflow: hidden;
+}
+.body--dark .tile {
+  background: #1d1d1d;
+  border-color: #333;
+}
+
+.tile-media {
+  position: relative;
+  display: block;
+}
+
+.tile-thumb {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+}
+
+.duration-badge {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+
+.tile-name {
+  display: block;
+  padding: 4px 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #444;
+}
+.body--dark .tile-name {
+  color: #bbb;
+}
+
+/* caption text that Quasar leaves grey-7/8 in both themes */
+.body--dark .text-grey-7,
+.body--dark .text-grey-8 {
+  color: #a0a0a0;
+}
+
+/* --- tag category colors (e621-like, spec §8) --- */
+.tag-cat-pool_type { color: #00a3a3; }
+.tag-cat-general { color: #5c7ea3; }
+.tag-cat-artist { color: #f2ac08; }
+.tag-cat-character { color: #00aa00; }
+.tag-cat-copyright { color: #dd00dd; }
+.tag-cat-meta { color: #ff3d3d; }
+.body--dark .tag-cat-general { color: #b4c7d9; }
+
+.query-help {
+  max-width: 520px;
+}
