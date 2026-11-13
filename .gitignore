@@ -21,3 +21,6 @@ docker-compose.prod.yml
 
 # serena language-server cache/config
 .serena/
+
+# Internal design/plan docs (dev repo only) — never versioned in this public repo
+docs/
